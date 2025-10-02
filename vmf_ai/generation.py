@@ -37,7 +37,8 @@ def generate_vmf_text(
     model = model.to(device_obj)
     model.eval()
 
-    encoded = torch.tensor([tokenizer.encode(prompt)], device=device_obj)
+    encoded_prompt = tokenizer.encode(prompt, add_eos=False)
+    encoded = torch.tensor([encoded_prompt], device=device_obj)
     attention_mask = torch.ones_like(encoded)
     generated = model.generate(
         encoded,

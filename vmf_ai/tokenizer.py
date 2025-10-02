@@ -66,9 +66,26 @@ class VMFTokenizer:
         return cleaned
 
     # ------------------------------------------------------------------
-    def encode(self, text: str) -> List[int]:
-        """Return token ids with BOS/EOS markers."""
-        tokens = [self.bos_token, *self.tokenise(text), self.eos_token]
+    def encode(self, text: str, *, add_bos: bool = True, add_eos: bool = True) -> List[int]:
+        """Return token ids for ``text``.
+
+        Parameters
+        ----------
+        text:
+            VMF snippet to encode.
+        add_bos / add_eos:
+            Control whether the begin/end-of-sequence markers should be
+            prepended/appended. During training both markers are desirable,
+            whereas generation time usually omits the ``<eos>`` token from the
+            priming prompt to avoid terminating immediately.
+        """
+
+        tokens: List[str] = []
+        if add_bos:
+            tokens.append(self.bos_token)
+        tokens.extend(self.tokenise(text))
+        if add_eos:
+            tokens.append(self.eos_token)
         return [self._vocab.get(tok, self.unk_id) for tok in tokens]
 
     # ------------------------------------------------------------------
@@ -76,8 +93,10 @@ class VMFTokenizer:
         """Convert a sequence of token ids back to VMF text."""
         tokens: List[str] = []
         for token_id in token_ids:
-            if token_id in (self.bos_id, self.eos_id, self.pad_id):
+            if token_id == self.bos_id or token_id == self.pad_id:
                 continue
+            if token_id == self.eos_id:
+                break
             if token_id >= len(self._inverse_vocab):
                 tokens.append(self.unk_token)
             else:
