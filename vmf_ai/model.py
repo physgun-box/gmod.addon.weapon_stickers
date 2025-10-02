@@ -1,113 +1,108 @@
-"""Neural network architecture for VMF language modelling."""
+"""Neural network architecture for VMF brush-layout generation."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 from torch import nn
 
 
 @dataclass
-class ModelConfig:
-    vocab_size: int
-    d_model: int = 256
-    n_heads: int = 8
-    num_layers: int = 6
-    dropout: float = 0.1
-    feedforward_dim: int = 1024
-    max_sequence_length: int = 2048
+class GeneratorConfig:
+    """Configuration describing the layout generator network."""
+
+    max_brushes: int
+    feature_dim: int = 6
+    hidden_dim: int = 512
+    latent_dim: int = 64
+    decoder_hidden_dim: int = 256
+    material_vocab_size: int = 32
+    material_embedding_dim: int = 16
 
 
-class VMFTransformerLM(nn.Module):
-    """A causal Transformer language model specialised for VMF tokens."""
+class VMFBrushGenerator(nn.Module):
+    """Variational autoencoder modelling VMF brush layouts."""
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: GeneratorConfig) -> None:
         super().__init__()
         self.config = config
 
-        self.token_embed = nn.Embedding(config.vocab_size, config.d_model)
-        self.position_embed = nn.Embedding(config.max_sequence_length, config.d_model)
+        encoder_input_dim = config.max_brushes * (config.feature_dim + config.material_embedding_dim)
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=config.d_model,
-            nhead=config.n_heads,
-            dim_feedforward=config.feedforward_dim,
-            dropout=config.dropout,
-            batch_first=True,
-            activation="gelu",
+        self.material_embedding = nn.Embedding(config.material_vocab_size, config.material_embedding_dim)
+
+        self.encoder = nn.Sequential(
+            nn.Linear(encoder_input_dim, config.hidden_dim),
+            nn.GELU(),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.GELU(),
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=config.num_layers)
-        self.layer_norm = nn.LayerNorm(config.d_model)
-        self.output = nn.Linear(config.d_model, config.vocab_size)
+        self.encoder_mu = nn.Linear(config.hidden_dim, config.latent_dim)
+        self.encoder_logvar = nn.Linear(config.hidden_dim, config.latent_dim)
+
+        decoder_output_dim = config.max_brushes * config.decoder_hidden_dim
+        self.decoder = nn.Sequential(
+            nn.Linear(config.latent_dim, config.hidden_dim),
+            nn.GELU(),
+            nn.Linear(config.hidden_dim, decoder_output_dim),
+            nn.GELU(),
+        )
+        self.feature_head = nn.Linear(config.decoder_hidden_dim, config.feature_dim)
+        self.material_head = nn.Linear(config.decoder_hidden_dim, config.material_vocab_size)
+        self.presence_head = nn.Linear(config.decoder_hidden_dim, 1)
 
     # ------------------------------------------------------------------
-    def _causal_mask(self, size: int, device: torch.device) -> torch.Tensor:
-        mask = torch.full((size, size), float("-inf"), device=device)
-        mask.triu_(1)
-        return mask
+    def _encode(self, features: torch.Tensor, materials: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        embedded = self.material_embedding(materials)
+        x = torch.cat([features, embedded], dim=-1)
+        x = x * mask.unsqueeze(-1).float()
+        x = x.view(x.size(0), -1)
+        hidden = self.encoder(x)
+        mu = self.encoder_mu(hidden)
+        logvar = self.encoder_logvar(hidden)
+        return mu, logvar
+
+    # ------------------------------------------------------------------
+    def _reparameterise(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    # ------------------------------------------------------------------
+    def _decode(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch = z.size(0)
+        hidden = self.decoder(z)
+        hidden = hidden.view(batch, self.config.max_brushes, self.config.decoder_hidden_dim)
+        feature_pred = self.feature_head(hidden)
+        material_logits = self.material_head(hidden)
+        presence_logits = self.presence_head(hidden).squeeze(-1)
+        return feature_pred, material_logits, presence_logits
 
     # ------------------------------------------------------------------
     def forward(
         self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        batch, seq_len = input_ids.size()
-        if seq_len > self.config.max_sequence_length:
-            raise ValueError(
-                f"Sequence length {seq_len} exceeds model maximum {self.config.max_sequence_length}"
-            )
-
-        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
-        hidden = self.token_embed(input_ids) + self.position_embed(positions)
-        hidden = self.layer_norm(hidden)
-
-        padding_mask = None
-        if attention_mask is not None:
-            padding_mask = attention_mask == 0
-
-        logits = self.transformer(
-            hidden,
-            mask=self._causal_mask(seq_len, input_ids.device),
-            src_key_padding_mask=padding_mask,
-        )
-        logits = self.output(logits)
-        return logits
+        features: torch.Tensor,
+        materials: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        mu, logvar = self._encode(features, materials, mask)
+        z = self._reparameterise(mu, logvar)
+        feature_pred, material_logits, presence_logits = self._decode(z)
+        return {
+            "feature_pred": feature_pred,
+            "material_logits": material_logits,
+            "presence_logits": presence_logits,
+            "mu": mu,
+            "logvar": logvar,
+        }
 
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def generate(
-        self,
-        input_ids: torch.Tensor,
-        max_new_tokens: int,
-        attention_mask: Optional[torch.Tensor] = None,
-        temperature: float = 1.0,
-        top_k: int = 0,
-    ) -> torch.Tensor:
-        self.eval()
-
-        generated = input_ids.clone()
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
-
-        for _ in range(max_new_tokens):
-            logits = self.forward(generated, attention_mask)
-            next_token_logits = logits[:, -1, :]
-            next_token_logits = next_token_logits / max(temperature, 1e-5)
-
-            if top_k > 0:
-                top_values, _ = torch.topk(next_token_logits, top_k)
-                min_threshold = top_values[:, -1].unsqueeze(-1)
-                filtered = torch.where(
-                    next_token_logits < min_threshold, torch.full_like(next_token_logits, -float("inf")), next_token_logits
-                )
-                probs = torch.softmax(filtered, dim=-1)
-            else:
-                probs = torch.softmax(next_token_logits, dim=-1)
-
-            next_tokens = torch.multinomial(probs, num_samples=1)
-            generated = torch.cat([generated, next_tokens], dim=1)
-            attention_mask = torch.cat([attention_mask, torch.ones_like(next_tokens)], dim=1)
-
-        return generated
+    def sample(self, num_samples: int) -> dict[str, torch.Tensor]:
+        z = torch.randn(num_samples, self.config.latent_dim, device=next(self.parameters()).device)
+        feature_pred, material_logits, presence_logits = self._decode(z)
+        return {
+            "feature_pred": feature_pred,
+            "material_logits": material_logits,
+            "presence_logits": presence_logits,
+        }
