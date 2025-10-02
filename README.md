@@ -84,6 +84,61 @@ Runs VBSP, VVIS and VRAD on the specified VMF. Use the `--vbsp`, `--vvis` and
 for quick builds, and `--final` plus `--lighting` (`both`, `hdr`, or `ldr`) for
 production-quality lighting.
 
+## AI-assisted VMF generation
+
+The repository now ships with an end-to-end workflow for training a Transformer
+language model on existing VMF files and sampling new layouts from it.
+
+### Training a model
+
+Collect a directory of `.vmf` files and launch training with:
+
+```bash
+python scripts/train_vmf_language_model.py /path/to/vmfs checkpoints/vmf-lm \
+    --epochs 25 --batch-size 8 --sequence-length 768
+```
+
+Shell and Windows batch helpers are available if you prefer:
+
+```bash
+scripts/train_vmf_language_model.sh /path/to/vmfs checkpoints/vmf-lm
+```
+
+```bat
+scripts\train_vmf_language_model.bat C:\path\to\vmfs checkpoints\vmf-lm
+```
+
+During training the script learns a custom tokenizer tailored to your maps,
+writes epoch-by-epoch checkpoints to the output directory, and stores the
+tokenizer vocabulary alongside the run configuration for reproducibility.
+
+### Generating a map
+
+After training, generate new VMF text by sampling from a checkpoint:
+
+```bash
+python scripts/generate_vmf.py checkpoints/vmf-lm/epoch_025.pt \
+    checkpoints/vmf-lm/tokenizer.json generated/map.vmf \
+    --prompt "worldspawn {\n\t" --max-tokens 400 --temperature 0.9
+```
+
+Wrapper scripts run the same command and automatically open the result in the
+included viewer (falls back to a warning when a display is not available):
+
+```bash
+scripts/generate_vmf_and_preview.sh checkpoints/vmf-lm/epoch_025.pt \
+    checkpoints/vmf-lm/tokenizer.json generated/map.vmf
+```
+
+```bat
+scripts\generate_vmf_and_preview.bat checkpoints\vmf-lm\epoch_025.pt \
+    checkpoints\vmf-lm\tokenizer.json generated\map.vmf
+```
+
+You may supply a short prompt string or `--prompt-file` to steer the output.
+The generated text is saved as a VMF file that can be opened in Hammer or
+processed with the included tooling.
+
 ## Library usage
 
 Import the toolkit in your own Python code:
