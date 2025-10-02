@@ -39,7 +39,7 @@ class VMFFace:
                 for plane in planes:
                     if plane is self.plane:
                         continue
-                    if plane.distance_to_point(point) > 0.1:
+                    if plane.distance_to_point(point) < -0.1:
                         inside = False
                         break
                 if inside:
@@ -233,7 +233,10 @@ def parse_entity(block: List[Tuple[str, object]]) -> VMFEntity:
         props[key] = values[0] if isinstance(values[0], str) else values[0][0]
     entity_id = int(props.get('id', props.get('hammerid', '0')))
     classname = props.get('classname', '')
-    solids = [parse_solid(solid_block) for solid_block in data.get('solid', [])]
+    solids: List[VMFSolid] = []
+    for solid_block in data.get('solid', []):
+        if isinstance(solid_block, list):
+            solids.append(parse_solid(solid_block))
     return VMFEntity(id=entity_id, classname=classname, properties=props, solids=solids)
 
 
@@ -246,7 +249,8 @@ def parse_vmf(text: str) -> VMFMap:
         if key == 'world':
             world_data = tree_to_dict(block)
             for solid_block in world_data.get('solid', []):
-                solids.append(parse_solid(solid_block))
+                if isinstance(solid_block, list):
+                    solids.append(parse_solid(solid_block))
         elif key == 'entity':
             entities.append(parse_entity(block))
     # include brush entities geometry as part of solids list for rendering
