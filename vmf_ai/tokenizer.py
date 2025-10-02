@@ -1,132 +1,122 @@
-"""Text tokeniser for VMF files."""
+"""Material vocabulary management for VMF generation models."""
 from __future__ import annotations
 
 import json
-import re
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
-
-TOKEN_PATTERN = re.compile(r'\{|\}|\(|\)|"[^"\n]*"|//[^\n]*|[^\s{}()"/]+')
+from typing import Dict, Iterable, List
 
 
-class VMFTokenizer:
-    """Whitespace and punctuation aware tokeniser for VMF documents."""
+@dataclass
+class MaterialStatistics:
+    """Summary of materials present in the training corpus."""
+
+    counts: Dict[str, int]
+
+    def most_common(self, n: int | None = None) -> List[tuple[str, int]]:
+        counter = Counter(self.counts)
+        return counter.most_common(n)
+
+
+class MaterialVocabulary:
+    """Bidirectional mapping between material names and integer ids."""
 
     pad_token = "<pad>"
-    bos_token = "<bos>"
-    eos_token = "<eos>"
     unk_token = "<unk>"
 
-    def __init__(self, extra_tokens: Iterable[str] | None = None) -> None:
-        extra = list(extra_tokens or [])
-        specials = [self.pad_token, self.bos_token, self.eos_token, self.unk_token]
-        self._vocab: Dict[str, int] = {token: idx for idx, token in enumerate(specials + extra)}
-        self._inverse_vocab: List[str] = list(self._vocab.keys())
+    def __init__(self, materials: Iterable[str] | None = None, *, keep_top_k: int | None = None) -> None:
+        self._token_to_id: Dict[str, int] = {}
+        self._id_to_token: List[str] = []
+        self._counts: Counter[str] = Counter()
+        self._ensure_token(self.pad_token)
+        self._ensure_token(self.unk_token)
+        if materials is not None:
+            self.fit(materials, keep_top_k=keep_top_k)
 
     # ------------------------------------------------------------------
-    # Vocabulary helpers
+    def _ensure_token(self, token: str) -> None:
+        if token not in self._token_to_id:
+            self._token_to_id[token] = len(self._id_to_token)
+            self._id_to_token.append(token)
+
     # ------------------------------------------------------------------
     @property
     def pad_id(self) -> int:
-        return self._vocab[self.pad_token]
-
-    @property
-    def bos_id(self) -> int:
-        return self._vocab[self.bos_token]
-
-    @property
-    def eos_id(self) -> int:
-        return self._vocab[self.eos_token]
+        return self._token_to_id[self.pad_token]
 
     @property
     def unk_id(self) -> int:
-        return self._vocab[self.unk_token]
+        return self._token_to_id[self.unk_token]
 
-    def __len__(self) -> int:
-        return len(self._vocab)
-
-    # ------------------------------------------------------------------
-    def fit(self, texts: Iterable[str]) -> None:
-        """Populate the vocabulary with tokens found in ``texts``."""
-        for text in texts:
-            for token in self.tokenise(text):
-                if token not in self._vocab:
-                    self._vocab[token] = len(self._vocab)
-                    self._inverse_vocab.append(token)
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        return len(self._id_to_token)
 
     # ------------------------------------------------------------------
-    def tokenise(self, text: str) -> List[str]:
-        """Split VMF text into a list of tokens."""
-        tokens = TOKEN_PATTERN.findall(text)
-        cleaned: List[str] = []
-        for token in tokens:
-            if token.startswith("//"):
-                continue  # Strip single-line comments entirely
-            cleaned.append(token)
-        return cleaned
-
-    # ------------------------------------------------------------------
-    def encode(self, text: str, *, add_bos: bool = True, add_eos: bool = True) -> List[int]:
-        """Return token ids for ``text``.
+    def fit(self, materials: Iterable[str], *, keep_top_k: int | None = None) -> None:
+        """Populate the vocabulary from ``materials``.
 
         Parameters
         ----------
-        text:
-            VMF snippet to encode.
-        add_bos / add_eos:
-            Control whether the begin/end-of-sequence markers should be
-            prepended/appended. During training both markers are desirable,
-            whereas generation time usually omits the ``<eos>`` token from the
-            priming prompt to avoid terminating immediately.
+        materials:
+            Collection of material names observed in the dataset.
+        keep_top_k:
+            When provided, limits the vocabulary to the ``keep_top_k`` most
+            common materials. Rarer entries are mapped to :attr:`unk_token`.
         """
 
-        tokens: List[str] = []
-        if add_bos:
-            tokens.append(self.bos_token)
-        tokens.extend(self.tokenise(text))
-        if add_eos:
-            tokens.append(self.eos_token)
-        return [self._vocab.get(tok, self.unk_id) for tok in tokens]
+        self._counts.update(materials)
+        ordered = [token for token, _ in self._counts.most_common()]
+        if keep_top_k is not None:
+            limit = max(keep_top_k, 2) - 2  # reserve slots for pad/unk
+            ordered = ordered[:limit]
+        for token in ordered:
+            if token in {self.pad_token, self.unk_token}:
+                continue
+            self._ensure_token(token)
 
     # ------------------------------------------------------------------
-    def decode(self, token_ids: Sequence[int]) -> str:
-        """Convert a sequence of token ids back to VMF text."""
-        tokens: List[str] = []
-        for token_id in token_ids:
-            if token_id == self.bos_id or token_id == self.pad_id:
-                continue
-            if token_id == self.eos_id:
-                break
-            if token_id >= len(self._inverse_vocab):
-                tokens.append(self.unk_token)
-            else:
-                tokens.append(self._inverse_vocab[token_id])
+    def encode(self, material: str) -> int:
+        """Return the integer id for ``material``."""
 
-        output: List[str] = []
-        for idx, token in enumerate(tokens):
-            if token in {"{", "}", "(", ")"}:
-                if idx > 0 and output and not output[-1].endswith(" "):
-                    output.append(" ")
-                output.append(token)
-                continue
-            if idx > 0 and token[0] not in ')}':
-                output.append(" ")
-            output.append(token)
-        return "".join(output)
+        return self._token_to_id.get(material, self.unk_id)
+
+    # ------------------------------------------------------------------
+    def decode(self, material_id: int) -> str:
+        """Inverse mapping from ``material_id`` to the original name."""
+
+        if 0 <= material_id < len(self._id_to_token):
+            return self._id_to_token[material_id]
+        return self.unk_token
+
+    # ------------------------------------------------------------------
+    def statistics(self) -> MaterialStatistics:
+        return MaterialStatistics(dict(self._counts))
+
+    # ------------------------------------------------------------------
+    def to_json(self) -> dict:
+        return {
+            "tokens": self._id_to_token,
+            "counts": dict(self._counts),
+        }
 
     # ------------------------------------------------------------------
     def save(self, path: Path) -> None:
-        state = {
-            "vocab": self._vocab,
-            "inverse_vocab": self._inverse_vocab,
-        }
-        path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(self.to_json(), ensure_ascii=False, indent=2), encoding="utf-8")
 
     # ------------------------------------------------------------------
     @classmethod
-    def load(cls, path: Path) -> "VMFTokenizer":
-        data = json.loads(path.read_text(encoding="utf-8"))
-        tokenizer = cls()
-        tokenizer._vocab = {str(k): int(v) for k, v in data["vocab"].items()}
-        tokenizer._inverse_vocab = list(data["inverse_vocab"])
-        return tokenizer
+    def from_json(cls, data: dict) -> "MaterialVocabulary":
+        vocab = cls()
+        vocab._id_to_token = list(data.get("tokens", []))
+        vocab._token_to_id = {token: idx for idx, token in enumerate(vocab._id_to_token)}
+        vocab._counts = Counter({str(k): int(v) for k, v in data.get("counts", {}).items()})
+        # Guarantee the special tokens exist even when loading from older files
+        vocab._ensure_token(cls.pad_token)
+        vocab._ensure_token(cls.unk_token)
+        return vocab
+
+    # ------------------------------------------------------------------
+    @classmethod
+    def load(cls, path: Path) -> "MaterialVocabulary":
+        return cls.from_json(json.loads(path.read_text(encoding="utf-8")))

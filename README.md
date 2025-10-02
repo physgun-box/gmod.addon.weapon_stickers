@@ -86,58 +86,58 @@ production-quality lighting.
 
 ## AI-assisted VMF generation
 
-The repository now ships with an end-to-end workflow for training a Transformer
-language model on existing VMF files and sampling new layouts from it.
+The repository now ships with a geometry-focused workflow that learns directly
+from brush layouts instead of raw VMF text. A variational autoencoder (VAE)
+ingests existing maps, analyses the distribution of axis-aligned brushes and
+materials, and then samples entirely new arrangements that are converted back
+into VMF solids.
 
 ### Training a model
 
 Collect a directory of `.vmf` files and launch training with:
 
 ```bash
-python scripts/train_vmf_language_model.py /path/to/vmfs checkpoints/vmf-lm \
-    --epochs 25 --batch-size 8 --sequence-length 768
+python scripts/train_vmf_language_model.py /path/to/vmfs checkpoints/vmf-generator \
+    --epochs 25 --batch-size 8 --latent-dim 96
 ```
 
 Shell and Windows batch helpers are available if you prefer:
 
 ```bash
-scripts/train_vmf_language_model.sh /path/to/vmfs checkpoints/vmf-lm
+scripts/train_vmf_language_model.sh /path/to/vmfs checkpoints/vmf-generator
 ```
 
 ```bat
-scripts\train_vmf_language_model.bat C:\path\to\vmfs checkpoints\vmf-lm
+scripts\train_vmf_language_model.bat C:\path\to\vmfs checkpoints\vmf-generator
 ```
 
-During training the script learns a custom tokenizer tailored to your maps,
-writes epoch-by-epoch checkpoints to the output directory, and stores the
-tokenizer vocabulary alongside the run configuration for reproducibility.
+During training the script automatically extracts brush bounding boxes, builds
+a material vocabulary, normalises spatial features, and saves the learned
+statistics next to each checkpoint.
 
 ### Generating a map
 
-After training, generate new VMF text by sampling from a checkpoint:
+After training, generate a new VMF by sampling from a checkpoint:
 
 ```bash
-python scripts/generate_vmf.py checkpoints/vmf-lm/epoch_025.pt \
-    checkpoints/vmf-lm/tokenizer.json generated/map.vmf \
-    --prompt "worldspawn {\n\t" --max-tokens 400 --temperature 0.9
+python scripts/generate_vmf.py checkpoints/vmf-generator/epoch_025.pt \
+    generated/map.vmf --presence-threshold 0.55
 ```
 
 Wrapper scripts run the same command and automatically open the result in the
 included viewer (falls back to a warning when a display is not available):
 
 ```bash
-scripts/generate_vmf_and_preview.sh checkpoints/vmf-lm/epoch_025.pt \
-    checkpoints/vmf-lm/tokenizer.json generated/map.vmf
+scripts/generate_vmf_and_preview.sh checkpoints/vmf-generator/epoch_025.pt generated/map.vmf
 ```
 
 ```bat
-scripts\generate_vmf_and_preview.bat checkpoints\vmf-lm\epoch_025.pt \
-    checkpoints\vmf-lm\tokenizer.json generated\map.vmf
+scripts\generate_vmf_and_preview.bat checkpoints\vmf-generator\epoch_025.pt generated\map.vmf
 ```
 
-You may supply a short prompt string or `--prompt-file` to steer the output.
-The generated text is saved as a VMF file that can be opened in Hammer or
-processed with the included tooling.
+The generator predicts which brushes should exist, their materials, and their
+axis-aligned extents. The helper script converts the sampled brushes back into
+VMF solids that Hammer and the included tooling can consume.
 
 ## Library usage
 
